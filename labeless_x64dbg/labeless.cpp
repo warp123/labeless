@@ -49,6 +49,7 @@ static struct StaticConfig
 	UINT		hlpLogMessageId = 0;
 	UINT		hlpCommandReceived = 0;
 	UINT		hlpPortChanged = 0;
+	UINT		hlpShutdown = 0;
 } gConfig;
 
 static const char kBackendName[] {"labeless.backend.x64dbg"};
@@ -654,6 +655,7 @@ bool ClientData::remove(uint64_t jobId)
 }
 
 std::atomic_bool Labeless::m_ServerEnabled{ false };
+std::atomic_bool Labeless::m_PythonFinalized{ false };
 
 Labeless::Labeless()
 	: m_hInst(nullptr)
@@ -703,7 +705,18 @@ bool Labeless::destroy()
 	stopServer();
 	destroyPython();
 	google::protobuf::ShutdownProtobufLibrary();
+	m_PythonFinalized = true;
 	return true;
+}
+
+void Labeless::onPlugstop()
+{
+	// as plugstop is called from an another thread, the Python3 threading._shutdown()
+	// will hang on destroyPython() so delegate that to main thread
+	PostMessage(gConfig.helperWnd, gConfig.hlpShutdown, 0, 0);
+	while (!m_PythonFinalized) {
+		SleepEx(1, TRUE);
+	}
 }
 
 bool Labeless::initPython()
@@ -871,6 +884,11 @@ HWND Labeless::createWindow()
 	if (!gConfig.hlpPortChanged && !(gConfig.hlpPortChanged = RegisterWindowMessage(_T("{774A37C9-6398-44AD-8F07-A421B55F0435}"))))
 	{
 		log_r("RegisterWindowMessage(hlpPortChanged) failed. LastError: %08X", GetLastError());
+		return false;
+	}
+	if (!gConfig.hlpShutdown && !(gConfig.hlpShutdown = RegisterWindowMessage(_T("{3C322054-B099-403C-956A-3CB1B402659D}"))))
+	{
+		log_r("RegisterWindowMessage(hlpShutdown) failed. LastError: %08X", GetLastError());
 		return false;
 	}
 
@@ -1152,6 +1170,11 @@ LRESULT CALLBACK Labeless::helperWinProc(HWND hw, UINT msg, WPARAM wp, LPARAM lp
 	if (msg == gConfig.hlpPortChanged)
 	{
 		ll.onPortChanged();
+		return 0;
+	}
+	if (msg == gConfig.hlpShutdown)
+	{
+		Labeless::instance().destroy();
 		return 0;
 	}
 	switch (msg) {
