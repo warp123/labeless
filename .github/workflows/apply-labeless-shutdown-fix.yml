@@ -1,0 +1,68 @@
+name: Apply minimal Labeless shutdown fix
+
+on:
+  push:
+    branches:
+      - fix/1.1.7-python310-shutdown
+    paths:
+      - .github/workflows/apply-labeless-shutdown-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/1.1.7-python310-shutdown
+
+      - name: Apply shutdown-only changes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("labeless_x64dbg/labeless.cpp")
+          text = path.read_text(encoding="utf-8")
+
+          replacements = [
+              (
+                  "\tUINT\t\thlpPortChanged = 0;\n} gConfig;",
+                  "\tUINT\t\thlpPortChanged = 0;\n\tUINT\t\thlpShutdown = 0;\n} gConfig;",
+              ),
+              (
+                  "std::atomic_bool Labeless::m_ServerEnabled{ false };",
+                  "std::atomic_bool Labeless::m_ServerEnabled{ false };\nstd::atomic_bool Labeless::m_PythonFinalized{ false };",
+              ),
+              (
+                  "\tgoogle::protobuf::ShutdownProtobufLibrary();\n\treturn true;\n}\n\nbool Labeless::initPython()",
+                  "\tgoogle::protobuf::ShutdownProtobufLibrary();\n\tm_PythonFinalized = true;\n\treturn true;\n}\n\nvoid Labeless::onPlugstop()\n{\n\t// as plugstop is called from an another thread, the Python3 threading._shutdown()\n\t// will hang on destroyPython() so delegate that to main thread\n\tPostMessage(gConfig.helperWnd, gConfig.hlpShutdown, 0, 0);\n\twhile (!m_PythonFinalized) {\n\t\tSleepEx(1, TRUE);\n\t}\n}\n\nbool Labeless::initPython()",
+              ),
+              (
+                  "\tif (!gConfig.hlpPortChanged && !(gConfig.hlpPortChanged = RegisterWindowMessage(_T(\"{774A37C9-6398-44AD-8F07-A421B55F0435}\"))))\n\t{\n\t\tlog_r(\"RegisterWindowMessage(hlpPortChanged) failed. LastError: %08X\", GetLastError());\n\t\treturn false;\n\t}\n\n\tHWND rv = nullptr;",
+                  "\tif (!gConfig.hlpPortChanged && !(gConfig.hlpPortChanged = RegisterWindowMessage(_T(\"{774A37C9-6398-44AD-8F07-A421B55F0435}\"))))\n\t{\n\t\tlog_r(\"RegisterWindowMessage(hlpPortChanged) failed. LastError: %08X\", GetLastError());\n\t\treturn false;\n\t}\n\tif (!gConfig.hlpShutdown && !(gConfig.hlpShutdown = RegisterWindowMessage(_T(\"{3C322054-B099-403C-956A-3CB1B402659D}\"))))\n\t{\n\t\tlog_r(\"RegisterWindowMessage(hlpShutdown) failed. LastError: %08X\", GetLastError());\n\t\treturn false;\n\t}\n\n\tHWND rv = nullptr;",
+              ),
+              (
+                  "\tif (msg == gConfig.hlpPortChanged)\n\t{\n\t\tll.onPortChanged();\n\t\treturn 0;\n\t}\n\tswitch (msg) {",
+                  "\tif (msg == gConfig.hlpPortChanged)\n\t{\n\t\tll.onPortChanged();\n\t\treturn 0;\n\t}\n\tif (msg == gConfig.hlpShutdown)\n\t{\n\t\tLabeless::instance().destroy();\n\t\treturn 0;\n\t}\n\tswitch (msg) {",
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"Expected exactly one match, got {count}: {old[:80]!r}")
+              text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding="utf-8", newline="\n")
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add labeless_x64dbg/labeless.cpp
+          git diff --cached --check
+          git commit -m "fix(x64dbg): finalize Python on helper window thread"
+          git push origin HEAD:fix/1.1.7-python310-shutdown
